@@ -27,6 +27,22 @@ def _secret(key, default=""):
 DATA_MODE = _secret("PM_DATA_MODE", "csv") or "csv"
 REGION = _secret("PM_REGION", "")   # region wybrany na wejsciu (region -> liga -> play)
 
+# Rodzaj gramatyczny etykiet UI: 'm' (domyślnie, kluby) albo 'f' (raport dziewczynek).
+# Ustaw sekret PM_GENDER = "f", żeby przełączyć teksty na żeńskie.
+_GENDER_F = (_secret("PM_GENDER", "m") or "m").lower().startswith("f")
+L = {
+    "player_one":  "Piłkarka"               if _GENDER_F else "Zawodnik",
+    "players_gen": "zawodniczek"            if _GENDER_F else "zawodników",
+    "players_all": "Wszystkie zawodniczki"  if _GENDER_F else "Wszyscy zawodnicy",
+    "of_player":   "zawodniczki"            if _GENDER_F else "zawodnika",
+    "played":      "grała"                  if _GENDER_F else "grał",
+    "top_players": "Topowe piłkarki"        if _GENDER_F else "Topowi zawodnicy",
+    "no_players":  "Brak zawodniczek dla wybranych filtrów." if _GENDER_F
+                   else "Brak zawodników dla wybranych filtrów.",
+    "click_one":   "kliknij piłkarkę"       if _GENDER_F else "kliknij gracza",
+}
+
+
 NUMERIC_COMMA = ["match_score", "m_overall_score", "m_season_score", "overall_score",
                  "season_score", "global_last_overall_score", "global_last_season_score"]
 NUMERIC_PLAIN = ["minutes", "goals", "yellow_cards", "red_cards", "est_birth_year",
@@ -473,7 +489,7 @@ def badges_html(r):
     return "".join(out)
 
 
-EXPORT_COLS = [("zawodnik", "Zawodnik"), ("club_name", "Klub"), ("team_name", "Drużyna"),
+EXPORT_COLS = [("zawodnik", L["player_one"]), ("club_name", "Klub"), ("team_name", "Drużyna"),
                ("region_name", "Województwo"), ("est_birth_year", "Rocznik"),
                ("liga_wiodaca", "Liga wiodąca"),
                ("PM_Index", "PM Index"), ("PM_premia", "Premia"),
@@ -570,11 +586,88 @@ def check_password():
     return False
 
 
+def _visits_file():
+    return _secret("PM_VISITS_FILE", "") or "visits.json"
+
+
+def _bump_visits():
+    """Zlicza otwarcia (raz na sesję). Zapis do pliku JSON: {total, days:{YYYY-MM-DD:n}, last}.
+    Wszystko w try/except — błąd licznika NIGDY nie może wywalić aplikacji."""
+    try:
+        if st.session_state.get("_counted"):
+            return st.session_state.get("_visit_total")
+        st.session_state["_counted"] = True
+        import datetime
+        path = _visits_file()
+        data = {"total": 0, "days": {}}
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as fh:
+                    data = json.load(fh)
+            except Exception:
+                data = {"total": 0, "days": {}}
+        today = datetime.date.today().isoformat()
+        data["total"] = int(data.get("total", 0)) + 1
+        data.setdefault("days", {})
+        data["days"][today] = int(data["days"].get(today, 0)) + 1
+        data["last"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, ensure_ascii=False)
+        st.session_state["_visit_total"] = data["total"]
+        return data["total"]
+    except Exception:
+        return None
+
+
+def _show_visits():
+    """Panel statystyk — widoczny tylko pod adresem z ?stats=1 (dla Ciebie, nie dla klubu)."""
+    try:
+        if str(st.query_params.get("stats", "")) not in ("1", "true", "tak"):
+            return
+        path = _visits_file()
+        if not os.path.exists(path):
+            st.info("Licznik jeszcze pusty (brak zapisanych otwarć).")
+            return
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        st.markdown("### 📈 Statystyki otwarć")
+        c = st.columns(3)
+        c[0].metric("Otwarcia łącznie", int(data.get("total", 0)))
+        days = data.get("days", {})
+        import datetime
+        last7 = sum(v for d, v in days.items()
+                    if d >= (datetime.date.today() - datetime.timedelta(days=6)).isoformat())
+        c[1].metric("Ostatnie 7 dni", last7)
+        c[2].metric("Ostatnie otwarcie", data.get("last", "—"))
+        if days:
+            srt = pd.DataFrame(sorted(days.items()), columns=["Dzień", "Otwarcia"]).set_index("Dzień")
+            st.bar_chart(srt.tail(30))
+        st.caption("Uwaga: na darmowym Streamlit Cloud licznik zeruje się po restarcie/uśpieniu "
+                   "aplikacji (plik jest tymczasowy). To dolna granica od ostatniego startu.")
+    except Exception:
+        pass
+
+
+def _intro_md():
+    """Tekst wprowadzający raportu. Źródło: sekret PM_INTRO albo plik intro.md w repo.
+    Brak obu → nic się nie pokazuje (kluby bez intro.md są nietknięte)."""
+    txt = _secret("PM_INTRO", "")
+    if not txt and os.path.exists("intro.md"):
+        try:
+            with open("intro.md", encoding="utf-8") as fh:
+                txt = fh.read()
+        except Exception:
+            txt = ""
+    return txt
+
+
 def main():
     st.set_page_config(page_title="Almanach ligowy", layout="wide")
     st.markdown(CSS, unsafe_allow_html=True)
     if not check_password():
         st.stop()
+    _bump_visits()
+    _show_visits()
     stats, matches = load_data()
     data = build(stats, matches)
 
@@ -601,14 +694,14 @@ def main():
     def _header_text():
         st.title("Almanach ligowy")
         reg = f"Region: **{region_txt}**  ·  " if region_txt else ""
-        st.markdown(f"{reg}**{liga}** · zawodników: {len(data)} · "
+        st.markdown(f"{reg}**{liga}** · {L['players_gen']}: {len(data)} · "
                     f"z minutami w seniorach: {(data['senior_minutes'].fillna(0) > 0).sum()}")
         if len(plays) > 1:
             st.caption(f"Zestawienie obejmuje {len(plays)} rozgrywek (cały wybrany poziom / region). "
                        "Kolumny „(liga)” = łącznie z całego wybranego zakresu, „(total)” = cały sezon "
-                       "zawodnika we wszystkich rozgrywkach.")
+                       f"{L['of_player']} we wszystkich rozgrywkach.")
         else:
-            st.caption("Wszyscy zawodnicy z wybranej ligi wraz z meczami w bieżącym sezonie we "
+            st.caption(f"{L['players_all']} z wybranej ligi wraz z meczami w bieżącym sezonie we "
                        "wszystkich rozgrywkach. Kolumny „(liga)” dotyczą wybranej ligi, „(total)” — "
                        "całego sezonu.")
 
@@ -624,6 +717,11 @@ def main():
             "</div>", unsafe_allow_html=True)
     else:
         _header_text()
+
+    _intro = _intro_md()
+    if _intro:
+        with st.expander("ℹ️ O tym raporcie / jak korzystać", expanded=True):
+            st.markdown(_intro)
 
     # ---- FILTRY ----
     FILTER_KEYS = ["f_zaw", "f_klub", "f_rozgr", "f_liga", "f_woj",
@@ -643,11 +741,11 @@ def main():
         else:
             f_reg = []
         r1 = st.columns([2, 2, 2])
-        q = r1[0].text_input("Zawodnik (imię/nazwisko)", "", key="f_zaw")
+        q = r1[0].text_input(f"{L['player_one']} (imię/nazwisko)", "", key="f_zaw")
         f_club = r1[1].multiselect("Klub", sorted(data["club_name"].dropna().unique()), key="f_klub")
-        f_lg = r1[2].multiselect("Rozgrywki (gdziekolwiek grał)",
+        f_lg = r1[2].multiselect(f"Rozgrywki (gdziekolwiek {L['played']})",
                                  sorted({x for s in data["_leagues"].dropna() for x in s}), key="f_rozgr")
-        f_pl = st.multiselect("Liga (gdziekolwiek grał)",
+        f_pl = st.multiselect(f"Liga (gdziekolwiek {L['played']})",
                               sorted({x for s in data["_plays"].dropna() for x in s}), key="f_liga")
         r2 = st.columns(4)
         def rng(col, label, c, key):
@@ -660,7 +758,7 @@ def main():
         s_mecz = rng("mecze_play", "Mecze (liga)", r2[2], "f_mecz")
         s_kart = rng("kartki_total", "Kartki total", r2[3], "f_kart")
         r3 = st.columns(4)
-        f_up = r3[0].checkbox("↑ Grający ze starszymi", key="f_up")
+        f_up = r3[0].checkbox("↑ Gra ze starszymi", key="f_up")
         f_kad = r3[1].checkbox("🪑 W kadrze seniorów", key="f_kad")
         f_sen = r3[2].checkbox("⚽ Minuty w seniorach", key="f_sen")
         f_clj = r3[3].checkbox("🏅 Minuty w CLJ", key="f_clj")
@@ -691,11 +789,11 @@ def main():
     f = f.sort_values("PM_Index", ascending=False).reset_index(drop=True)
 
     # ---- KARTY TOPOWYCH (scroll w bok) ----
-    st.markdown("### 🏅 Topowi zawodnicy")
+    st.markdown(f"### 🏅 {L['top_players']}")
     if len(f):
         st.markdown(cards_html(f.head(15)), unsafe_allow_html=True)
     else:
-        st.info("Brak zawodników dla wybranych filtrów.")
+        st.info(L["no_players"])
 
     # ---- TABELA ----
     st.markdown("### 📋 Analityka")
@@ -731,7 +829,7 @@ def main():
         return " ".join(z)
     ft = f.copy()
     ft["Znaczniki"] = ft.apply(znaczniki, axis=1)
-    cmap = {"zawodnik": "Zawodnik", "Znaczniki": "Znaczniki", "region_name": "Województwo",
+    cmap = {"zawodnik": L["player_one"], "Znaczniki": "Znaczniki", "region_name": "Województwo",
             "team_name": "Drużyna",
             "club_name": "Klub", "est_birth_year": "Rocznik", "PM_Index": "PM Index",
             "PM_premia": "Premia", "pm_score": "Score (liga)", "pm_score_total": "Score (total)",
@@ -767,19 +865,19 @@ def main():
         st.markdown(f"### ⚽ Mecze: {who}")
         mm = matches[matches["player_id"] == sel_pid]
     else:
-        st.markdown(f"### ⚽ Mecze ({len(f)} zawodników) — kliknij gracza wyżej, by zawęzić")
+        st.markdown(f"### ⚽ Mecze ({len(f)} {L['players_gen']}) — {L['click_one']} wyżej, by zawęzić")
         mm = matches[matches["player_id"].isin(f["player_id"])]
     mm = mm.assign(pm_score=compute_pm_score(mm)["score"].values)
     mc = {"match_date": "Data", "region_name": "Województwo", "league_name": "Liga",
           "play_name": "Play",
           "team_name": "Drużyna", "opponent_name": "Przeciwnik", "team_side": "Strona",
           "match_result": "Wynik", "minutes": "Min", "goals": "Gole",
-          "yellow_cards": "ŻK", "red_cards": "CK", "pm_score": "Ocena (v7)",
+          "yellow_cards": "ŻK", "red_cards": "CK", "pm_score": "Score",
           "status_seniorski": "Status senior"}
     mshow = (mm.sort_values("match_date", ascending=False)
                [[c for c in mc if c in mm.columns]].rename(columns=mc))
     st.dataframe(mshow, use_container_width=True, height=360, hide_index=True,
-                 column_config={"Ocena (v7)": st.column_config.NumberColumn(format="%.3f")})
+                 column_config={"Score": st.column_config.NumberColumn(format="%.3f")})
 
 
 if __name__ == "__main__":
