@@ -1,9 +1,3 @@
-**Dziewczęta grające w rozgrywkach chłopców (małopolskie).**
-Raport zbiera zawodniczki, które w sezonie występują w męskich/koedukacyjnych ligach
-młodzieżowych Małopolski (kategorie C i D). Dla każdej pokazuje jej mecze, minuty,
-ekspozycję na grę ze starszymi/seniorami oraz **PM Index** — syntetyczny wskaźnik
-jakości na tle całej ligi (chłopcy i dziewczęta razem).
-
 **Jak korzystać z raportu**
 
 - **Nabory i skauting** — szybka lista kandydatek do żeńskich akademii i kadr
